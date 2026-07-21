@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
@@ -17,8 +18,13 @@ const ordersList = []; // most recent appended; can reverse for recent-first out
 let orderSeq = 0;
 
 function generateOrderId() {
+  if (typeof crypto.randomUUID === 'function') {
+    return `ord_${crypto.randomUUID()}`;
+  }
+
   orderSeq += 1;
-  return `ord_${Date.now()}_${orderSeq}`;
+  const rand = crypto.randomBytes(8).toString('hex');
+  return `ord_${Date.now()}_${orderSeq}_${rand}`;
 }
 
 // --- Auth helpers ---
@@ -189,4 +195,8 @@ app.get('/api/admin/orders', requireAuth, requireAdmin, (req, res) => {
   return res.json(recent);
 });
 
-app.listen(4000, () => console.log('Backend running on port 4000'));
+if (require.main === module) {
+  app.listen(4000, () => console.log('Backend running on port 4000'));
+}
+
+module.exports = app;
