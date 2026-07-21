@@ -5,109 +5,51 @@ import './App.css';
  * Minimal SwagLabs-like flow implementing:
  * - Login
  * - Products + cart
- * - Cart + Checkout (step-by-step with validation) (KAN-2)
- * - Receipt page with refetch on refresh (KAN-3)
- * - Admin orders page with role-based access control (KAN-4)
+ * - Cart + Checkout (two-step with validation)
+ * - Receipt page with refetch on refresh
+ * - Admin orders page with role-based access control
  *
- * Uses hash-based routing (no extra deps).
+ * Uses hash-based routing (no external deps).
  */
 
 const API_BASE = 'http://localhost:4000/api';
 
+/** -----------------------------
+ * Auth utilities
+ * localStorage keys: token, role, username
+ * ----------------------------- */
 function getAuth() {
   const token = localStorage.getItem('token') || '';
   const role = localStorage.getItem('role') || '';
-  return { token, role };
+  const username = localStorage.getItem('username') || '';
+  return { token, role, username };
 }
 
-function setAuth({ token, role }) {
-  localStorage.setItem('token', token);
-  localStorage.setItem('role', role);
+function setAuth({ token, role, username }) {
+  localStorage.setItem('token', token || '');
+  localStorage.setItem('role', role || '');
+  localStorage.setItem('username', username || '');
 }
 
 function clearAuth() {
   localStorage.removeItem('token');
   localStorage.removeItem('role');
+  localStorage.removeItem('username');
 }
 
-function formatMoney(value) {
-  const num = typeof value === 'number' ? value : Number(value || 0);
-  return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(
-    Number.isFinite(num) ? num : 0
-  );
+/** -----------------------------
+ * Hash routing
+ * ----------------------------- */
+function normalizeHash(hash) {
+  if (!hash || hash === '#') return '#/login';
+  if (!hash.startsWith('#')) return `#${hash.startsWith('/') ? hash : `/${hash}`}`;
+  if (hash === '#/') return '#/login';
+  if (hash.startsWith('#/')) return hash;
+  // best effort: "#login" -> "#/login"
+  return `#/${hash.replace(/^#/, '').replace(/^\//, '')}`;
 }
 
-function safeJsonParse(str, fallback) {
-  try {
-    return JSON.parse(str);
-  } catch {
-    return fallback;
-  }
-}
-
-function validateCheckoutCustomer(customer) {
-  const errors = {};
-  const required = ['firstName', 'lastName', 'address', 'postalCode'];
-  for (const key of required) {
-    const val = (customer?.[key] ?? '').toString().trim();
-    if (!val) errors[key] = 'Required';
-  }
-  return errors;
-}
-
-function mapBackendErrorsToFieldErrors(errJson) {
-  // Try a few common shapes:
-  // { errors: { field: "msg" } }
-  // { errors: [{ field, message }] }
-  // { message, details: [...] }
-  // { validationErrors: ... }
-  const fieldErrors = {};
-
-  const candidate =
-    errJson?.errors ??
-    errJson?.validationErrors ??
-    errJson?.details ??
-    errJson?.error?.details ??
-    null;
-
-  if (!candidate) return fieldErrors;
-
-  if (Array.isArray(candidate)) {
-    for (const item of candidate) {
-      const field = item?.field || item?.path || item?.name;
-      const message = item?.message || item?.msg || item?.error || 'Invalid';
-      if (field && !fieldErrors[field]) fieldErrors[field] = message;
-    }
-    return fieldErrors;
-  }
-
-  if (typeof candidate === 'object') {
-    for (const [k, v] of Object.entries(candidate)) {
-      if (typeof v === 'string') fieldErrors[k] = v;
-      else if (v && typeof v === 'object' && typeof v.message === 'string') fieldErrors[k] = v.message;
-      else fieldErrors[k] = 'Invalid';
-    }
-  }
-
-  return fieldErrors;
-}
-
-function getHashRoute() {
-  const hash = window.location.hash || '#/login';
-  // Normalize
-  if (hash === '#') return '#/login';
-  return hash;
-}
-
-function navigate(to) {
-  if (!to.startsWith('#')) {
-    window.location.hash = `#${to.startsWith('/') ? to : `/${to}`}`;
-  } else {
-    window.location.hash = to;
-  }
-}
-
-function parseRoute(hash) {
+function parseHashRoute(hash) {
   // Supports:
   // #/login
   // #/products
@@ -115,7 +57,7 @@ function parseRoute(hash) {
   // #/checkout
   // #/receipt/:orderId
   // #/admin/orders
-  const clean = (hash || '#/login').replace(/^#/, '');
+  const clean = normalizeHash(hash).replace(/^#/, '');
   const path = clean.startsWith('/') ? clean : `/${clean}`;
   const segments = path.split('/').filter(Boolean);
 
@@ -126,13 +68,35 @@ function parseRoute(hash) {
     params: {},
   };
 
-  if (segments[0] === 'receipt' && segments[1]) {
+  if (route.name === 'receipt' && segments[1]) {
     route.params.orderId = segments[1];
   }
 
   return route;
 }
 
+function navigate(toHash) {
+  const next = normalizeHash(toHash);
+  if (window.location.hash !== next) window.location.hash = next;
+}
+
+function useHashRoute() {
+  const [hash, setHash] = useState(() => normalizeHash(window.location.hash));
+
+  useEffect(() => {
+    const onHashChange = () => setHash(normalizeHash(window.location.hash));
+    window.addEventListener('hashchange', onHashChange);
+    // Ensure an initial valid hash
+    if (!window.location.hash || window.location.hash === '#') navigate('#/login');
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  return { hash, route: parseHashRoute(hash), navigate };
+}
+
+/** -----------------------------
+ * Helpers
+ * ----------------------------- */
 function request(url, options = {}) {
   return fetch(url, {
     ...options,
@@ -153,9 +117,23 @@ function authedRequest(url, token, options = {}) {
   });
 }
 
+function safeJsonParse(str, fallback) {
+  try {
+    return JSON.parse(str);
+  } catch {
+    return fallback;
+  }
+}
+
+function formatMoney(value) {
+  const num = typeof value === 'number' ? value : Number(value || 0);
+  return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(
+    Number.isFinite(num) ? num : 0
+  );
+}
+
 function computeCartSummary(cartItems) {
   const subtotal = cartItems.reduce((sum, it) => sum + (Number(it.price) || 0) * (Number(it.quantity) || 0), 0);
-  // No tax/shipping specified; keep minimal.
   const total = subtotal;
   const count = cartItems.reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
   return { subtotal, total, count };
@@ -179,33 +157,72 @@ function saveCartToStorage(cart) {
   localStorage.setItem('cart', JSON.stringify(cart));
 }
 
-function TopNav({ isAuthed, role, cartCount, onLogout }) {
+function validateCheckoutCustomer(customer) {
+  const errors = {};
+  const required = ['firstName', 'lastName', 'address', 'postalCode'];
+  for (const key of required) {
+    const val = (customer?.[key] ?? '').toString().trim();
+    if (!val) errors[key] = 'Required';
+  }
+  return errors;
+}
+
+function mapBackendErrorsToCheckoutFields(errJson) {
+  // Expected shape (per task):
+  // { errors: { "customer.firstName": "Required", ... } }
+  const out = {};
+  const errors = errJson?.errors;
+  if (!errors || typeof errors !== 'object' || Array.isArray(errors)) return out;
+
+  for (const [key, message] of Object.entries(errors)) {
+    if (typeof message !== 'string') continue;
+    if (!key) continue;
+
+    // customer.firstName -> firstName
+    const match = key.match(/^customer\.(.+)$/);
+    const field = match?.[1] || key;
+    if (!out[field]) out[field] = message;
+  }
+
+  return out;
+}
+
+/** -----------------------------
+ * UI Components / Pages
+ * ----------------------------- */
+function NavBar({ isAuthed, role, username, cartCount, onLogout }) {
+  const isAdmin = role === 'admin';
+
   return (
     <div className="nav">
       <div className="nav-left">
-        <button className="linklike" onClick={() => navigate('/products')} disabled={!isAuthed}>
+        <button className="linklike" onClick={() => navigate('#/products')} disabled={!isAuthed}>
           Products
         </button>
-        <button className="linklike" onClick={() => navigate('/cart')} disabled={!isAuthed}>
+        <button className="linklike" onClick={() => navigate('#/cart')} disabled={!isAuthed}>
           Cart{cartCount > 0 ? ` (${cartCount})` : ''}
         </button>
-        <button className="linklike" onClick={() => navigate('/checkout')} disabled={!isAuthed}>
+        <button className="linklike" onClick={() => navigate('#/checkout')} disabled={!isAuthed}>
           Checkout
         </button>
-        <button className="linklike" onClick={() => navigate('/admin/orders')} disabled={!isAuthed}>
-          Admin Orders
-        </button>
+        {isAdmin ? (
+          <button className="linklike" onClick={() => navigate('#/admin/orders')} disabled={!isAuthed}>
+            Admin Orders
+          </button>
+        ) : null}
       </div>
+
       <div className="nav-right">
         {isAuthed ? (
           <>
+            <span className="badge">User: {username || 'unknown'}</span>
             <span className="badge">Role: {role || 'unknown'}</span>
             <button className="btn" onClick={onLogout}>
               Logout
             </button>
           </>
         ) : (
-          <button className="btn" onClick={() => navigate('/login')}>
+          <button className="btn" onClick={() => navigate('#/login')}>
             Login
           </button>
         )}
@@ -224,6 +241,7 @@ function LoginPage({ onLoginSuccess }) {
     e.preventDefault();
     setError('');
     setLoading(true);
+
     try {
       const res = await request(`${API_BASE}/login`, {
         method: 'POST',
@@ -239,16 +257,17 @@ function LoginPage({ onLoginSuccess }) {
       }
 
       const token = data?.token;
-      const role = data?.role;
+      const role = data?.role || '';
 
       if (!token) {
         setError('Login succeeded but token missing');
         return;
       }
 
-      setAuth({ token, role: role || '' });
-      onLoginSuccess({ token, role: role || '' });
-      navigate('/products');
+      const auth = { token, role, username };
+      setAuth(auth);
+      onLoginSuccess(auth);
+      navigate('#/products');
     } catch (err) {
       setError(err?.message || 'Network error');
     } finally {
@@ -259,13 +278,16 @@ function LoginPage({ onLoginSuccess }) {
   return (
     <div className="page">
       <h1>SwagLabs Clone</h1>
-      <p className="muted">Login as <code>standard_user</code> or <code>admin_user</code>.</p>
+      <p className="muted">
+        Login as <code>standard_user</code> or <code>admin_user</code>.
+      </p>
 
       <form className="card form" onSubmit={handleSubmit}>
         <div className="field">
           <label>Username</label>
           <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
         </div>
+
         <div className="field">
           <label>Password</label>
           <input
@@ -286,53 +308,29 @@ function LoginPage({ onLoginSuccess }) {
   );
 }
 
-function ProductsPage({ token, cartItems, onAddToCart, onSetCartItemQuantity }) {
-  const [products, setProducts] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
+function ProductsPage({ token, products, loadingProducts, productsError, onReload, cartItems, onAddToCart, onSetQty }) {
   const cartIndex = useMemo(() => {
     const m = new Map();
     for (const it of cartItems) m.set(it.id, it);
     return m;
   }, [cartItems]);
 
-  useEffect(() => {
-    let alive = true;
-    async function load() {
-      setLoading(true);
-      setError('');
-      try {
-        const res = await authedRequest(`${API_BASE}/products`, token, { method: 'GET' });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          setError(data?.message || 'Failed to load products');
-          return;
-        }
-        if (alive) setProducts(Array.isArray(data) ? data : data?.products || []);
-      } catch (err) {
-        setError(err?.message || 'Network error');
-      } finally {
-        if (alive) setLoading(false);
-      }
-    }
-    load();
-    return () => {
-      alive = false;
-    };
-  }, [token]);
-
   return (
     <div className="page">
       <div className="page-header">
         <h1>Products</h1>
-        <button className="btn" onClick={() => navigate('/cart')}>
-          Go to Cart
-        </button>
+        <div className="row">
+          <button className="btn" onClick={() => navigate('#/cart')}>
+            Go to Cart
+          </button>
+          <button className="btn" onClick={onReload} disabled={!token || loadingProducts}>
+            {loadingProducts ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
       </div>
 
-      {loading ? <div className="muted">Loading…</div> : null}
-      {error ? <div className="error">{error}</div> : null}
+      {loadingProducts ? <div className="muted">Loading…</div> : null}
+      {productsError ? <div className="error">{productsError}</div> : null}
 
       <div className="grid">
         {products.map((p) => {
@@ -340,16 +338,14 @@ function ProductsPage({ token, cartItems, onAddToCart, onSetCartItemQuantity }) 
           const name = p.name ?? p.title ?? 'Product';
           const price = Number(p.price) || 0;
           const inCart = cartIndex.get(id);
+
           return (
             <div className="card product" key={String(id)}>
               <div className="product-title">{name}</div>
               <div className="muted">{formatMoney(price)}</div>
+
               <div className="row">
-                <button
-                  className="btn primary"
-                  onClick={() => onAddToCart({ id, name, price })}
-                  disabled={!id}
-                >
+                <button className="btn primary" onClick={() => onAddToCart({ id, name, price })} disabled={!id}>
                   Add to cart
                 </button>
 
@@ -360,7 +356,7 @@ function ProductsPage({ token, cartItems, onAddToCart, onSetCartItemQuantity }) 
                     type="number"
                     min="0"
                     value={inCart?.quantity || 0}
-                    onChange={(e) => onSetCartItemQuantity(id, Number(e.target.value || 0))}
+                    onChange={(e) => onSetQty(id, Number(e.target.value || 0))}
                     disabled={!id}
                   />
                 </div>
@@ -370,28 +366,30 @@ function ProductsPage({ token, cartItems, onAddToCart, onSetCartItemQuantity }) 
         })}
       </div>
 
-      {!loading && !error && products.length === 0 ? (
-        <div className="empty">No products found.</div>
-      ) : null}
+      {!loadingProducts && !productsError && products.length === 0 ? <div className="empty">No products found.</div> : null}
     </div>
   );
 }
 
-function CartPage({ cartItems, onSetCartItemQuantity, onRemoveFromCart }) {
+function CartPage({ cartItems, onSetQty, onRemove }) {
   const { subtotal, total, count } = useMemo(() => computeCartSummary(cartItems), [cartItems]);
 
   return (
     <div className="page">
       <div className="page-header">
         <h1>Cart</h1>
-        <button className="btn primary" onClick={() => navigate('/checkout')} disabled={count === 0}>
+        <button className="btn primary" onClick={() => navigate('#/checkout')} disabled={count === 0}>
           Proceed to checkout
         </button>
       </div>
 
       {cartItems.length === 0 ? (
         <div className="empty">
-          Your cart is empty. <button className="linklike" onClick={() => navigate('/products')}>Browse products</button>.
+          Your cart is empty.{' '}
+          <button className="linklike" onClick={() => navigate('#/products')}>
+            Browse products
+          </button>
+          .
         </div>
       ) : (
         <div className="card">
@@ -416,12 +414,12 @@ function CartPage({ cartItems, onSetCartItemQuantity, onRemoveFromCart }) {
                       type="number"
                       min="0"
                       value={it.quantity}
-                      onChange={(e) => onSetCartItemQuantity(it.id, Number(e.target.value || 0))}
+                      onChange={(e) => onSetQty(it.id, Number(e.target.value || 0))}
                     />
                   </td>
                   <td align="right">{formatMoney((Number(it.price) || 0) * (Number(it.quantity) || 0))}</td>
                   <td align="right">
-                    <button className="btn danger" onClick={() => onRemoveFromCart(it.id)}>
+                    <button className="btn danger" onClick={() => onRemove(it.id)}>
                       Remove
                     </button>
                   </td>
@@ -448,12 +446,7 @@ function CartPage({ cartItems, onSetCartItemQuantity, onRemoveFromCart }) {
 
 function CheckoutPage({ token, cartItems, onClearCart }) {
   const [step, setStep] = useState(1);
-  const [customer, setCustomer] = useState({
-    firstName: '',
-    lastName: '',
-    address: '',
-    postalCode: '',
-  });
+  const [customer, setCustomer] = useState({ firstName: '', lastName: '', address: '', postalCode: '' });
   const [fieldErrors, setFieldErrors] = useState({});
   const [submitError, setSubmitError] = useState('');
   const [placingOrder, setPlacingOrder] = useState(false);
@@ -470,9 +463,9 @@ function CheckoutPage({ token, cartItems, onClearCart }) {
 
   function updateCustomer(key, value) {
     setCustomer((c) => ({ ...c, [key]: value }));
-    setFieldErrors((e) => {
-      if (!e[key]) return e;
-      const next = { ...e };
+    setFieldErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
       delete next[key];
       return next;
     });
@@ -488,9 +481,10 @@ function CheckoutPage({ token, cartItems, onClearCart }) {
   async function placeOrder() {
     setSubmitError('');
     setFieldErrors({});
-    const errors = validateCheckoutCustomer(customer);
-    if (Object.keys(errors).length > 0) {
-      setFieldErrors(errors);
+
+    const clientErrors = validateCheckoutCustomer(customer);
+    if (Object.keys(clientErrors).length > 0) {
+      setFieldErrors(clientErrors);
       setStep(1);
       return;
     }
@@ -502,6 +496,7 @@ function CheckoutPage({ token, cartItems, onClearCart }) {
     }
 
     setPlacingOrder(true);
+
     try {
       const payload = {
         customer: {
@@ -527,13 +522,13 @@ function CheckoutPage({ token, cartItems, onClearCart }) {
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        const backendFieldErrors = mapBackendErrorsToFieldErrors(data);
+        const backendFieldErrors = mapBackendErrorsToCheckoutFields(data);
         if (Object.keys(backendFieldErrors).length > 0) {
           setFieldErrors(backendFieldErrors);
           setStep(1);
-        } else {
-          setSubmitError(data?.message || 'Failed to place order');
+          return;
         }
+        setSubmitError(data?.message || 'Failed to place order');
         return;
       }
 
@@ -544,7 +539,7 @@ function CheckoutPage({ token, cartItems, onClearCart }) {
       }
 
       onClearCart();
-      navigate(`/receipt/${orderId}`);
+      navigate(`#/receipt/${encodeURIComponent(String(orderId))}`);
     } catch (err) {
       if (!mountedRef.current) return;
       setSubmitError(err?.message || 'Network error');
@@ -562,7 +557,11 @@ function CheckoutPage({ token, cartItems, onClearCart }) {
 
       {count === 0 ? (
         <div className="empty">
-          Your cart is empty. <button className="linklike" onClick={() => navigate('/products')}>Add products</button> to checkout.
+          Your cart is empty.{' '}
+          <button className="linklike" onClick={() => navigate('#/products')}>
+            Add products
+          </button>{' '}
+          to checkout.
         </div>
       ) : null}
 
@@ -597,10 +596,10 @@ function CheckoutPage({ token, cartItems, onClearCart }) {
           </div>
 
           <div className="row">
-            <button className="btn" onClick={() => navigate('/cart')}>
+            <button className="btn" onClick={() => navigate('#/cart')}>
               Back to cart
             </button>
-            <button className="btn primary" onClick={validateStep1AndProceed}>
+            <button className="btn primary" onClick={validateStep1AndProceed} disabled={count === 0}>
               Continue
             </button>
           </div>
@@ -653,7 +652,7 @@ function CheckoutPage({ token, cartItems, onClearCart }) {
             <button className="btn" onClick={() => setStep(1)} disabled={placingOrder}>
               Back
             </button>
-            <button className="btn primary" onClick={placeOrder} disabled={placingOrder}>
+            <button className="btn primary" onClick={placeOrder} disabled={placingOrder || count === 0}>
               {placingOrder ? 'Placing order…' : 'Place Order'}
             </button>
           </div>
@@ -670,16 +669,20 @@ function ReceiptPage({ token, orderId }) {
 
   useEffect(() => {
     let alive = true;
+
     async function load() {
       setLoading(true);
       setError('');
+
       try {
         const res = await authedRequest(`${API_BASE}/orders/${encodeURIComponent(orderId)}`, token, { method: 'GET' });
         const data = await res.json().catch(() => ({}));
+
         if (!res.ok) {
           setError(data?.message || 'Failed to load receipt');
           return;
         }
+
         if (alive) setOrder(data);
       } catch (err) {
         setError(err?.message || 'Network error');
@@ -687,7 +690,9 @@ function ReceiptPage({ token, orderId }) {
         if (alive) setLoading(false);
       }
     }
+
     if (orderId) load();
+
     return () => {
       alive = false;
     };
@@ -714,7 +719,7 @@ function ReceiptPage({ token, orderId }) {
     <div className="page">
       <div className="page-header">
         <h1>Receipt</h1>
-        <button className="btn" onClick={() => navigate('/products')}>
+        <button className="btn" onClick={() => navigate('#/products')}>
           Back to products
         </button>
       </div>
@@ -731,9 +736,7 @@ function ReceiptPage({ token, orderId }) {
               <div className="muted">Order ID</div>
               <div className="strong">{String(displayOrderId)}</div>
             </div>
-            <div className="muted">
-              {order?.createdAt ? `Created: ${new Date(order.createdAt).toLocaleString()}` : null}
-            </div>
+            <div className="muted">{order?.createdAt ? `Created: ${new Date(order.createdAt).toLocaleString()}` : null}</div>
           </div>
 
           <h2 style={{ marginTop: 16 }}>Items</h2>
@@ -773,7 +776,7 @@ function AdminOrdersPage({ token, role }) {
   const [error, setError] = useState('');
   const [orders, setOrders] = useState([]);
 
-  const isAdmin = role === 'admin' || role === 'admin_user' || role === 'adminUser' || role === 'admin-user';
+  const isAdmin = role === 'admin';
 
   useEffect(() => {
     let alive = true;
@@ -781,13 +784,16 @@ function AdminOrdersPage({ token, role }) {
     async function load() {
       setLoading(true);
       setError('');
+
       try {
         const res = await authedRequest(`${API_BASE}/admin/orders`, token, { method: 'GET' });
         const data = await res.json().catch(() => ({}));
+
         if (!res.ok) {
           setError(data?.message || 'Failed to load admin orders');
           return;
         }
+
         const list = Array.isArray(data) ? data : data?.orders || [];
         if (alive) setOrders(Array.isArray(list) ? list : []);
       } catch (err) {
@@ -819,14 +825,13 @@ function AdminOrdersPage({ token, role }) {
     <div className="page">
       <div className="page-header">
         <h1>Admin Orders</h1>
-        <button className="btn" onClick={() => navigate('/products')}>
+        <button className="btn" onClick={() => navigate('#/products')}>
           Back to products
         </button>
       </div>
 
       {loading ? <div className="muted">Loading…</div> : null}
       {error ? <div className="error">{error}</div> : null}
-
       {!loading && !error && orders.length === 0 ? <div className="empty">No recent orders.</div> : null}
 
       {orders.length > 0 ? (
@@ -866,7 +871,7 @@ function RequireAuth({ isAuthed, children }) {
       <div className="page">
         <div className="card">
           <div className="error">You are not logged in.</div>
-          <button className="btn primary" onClick={() => navigate('/login')}>
+          <button className="btn primary" onClick={() => navigate('#/login')}>
             Go to login
           </button>
         </div>
@@ -876,45 +881,71 @@ function RequireAuth({ isAuthed, children }) {
   return children;
 }
 
+/** -----------------------------
+ * App
+ * ----------------------------- */
 function App() {
-  const [routeHash, setRouteHash] = useState(getHashRoute());
+  const { hash, route } = useHashRoute();
   const [auth, setAuthState] = useState(() => getAuth());
+
   const [cart, setCart] = useState(() => loadCartFromStorage());
+
+  // App-level products state
+  const [products, setProducts] = useState([]);
+  const [loadingProducts, setLoadingProducts] = useState(false);
+  const [productsError, setProductsError] = useState('');
 
   const isAuthed = Boolean(auth.token);
   const { subtotal, total, count } = useMemo(() => computeCartSummary(cart), [cart]);
-
-  useEffect(() => {
-    function onHashChange() {
-      setRouteHash(getHashRoute());
-    }
-    window.addEventListener('hashchange', onHashChange);
-    // Ensure a valid initial route
-    if (!window.location.hash) navigate('/login');
-    return () => window.removeEventListener('hashchange', onHashChange);
-  }, []);
 
   useEffect(() => {
     saveCartToStorage(cart);
   }, [cart]);
 
   useEffect(() => {
-    // Basic route guard: if authed and on login, go to products; if not authed and on protected routes, go login.
-    const r = parseRoute(routeHash);
-    const isLogin = r.name === 'login';
-    const isReceipt = r.name === 'receipt';
-    const isProtected = !isLogin; // everything but login is protected
-    if (isAuthed && isLogin) navigate('/products');
-    if (!isAuthed && isProtected) navigate('/login');
+    // Route guard: everything except login is protected
+    const isLogin = route.name === 'login';
+    const isProtected = !isLogin;
+
+    if (isAuthed && isLogin) navigate('#/products');
+    if (!isAuthed && isProtected) navigate('#/login');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthed]);
+  }, [isAuthed, hash]);
+
+  async function loadProducts(token) {
+    setLoadingProducts(true);
+    setProductsError('');
+    try {
+      const res = await authedRequest(`${API_BASE}/products`, token, { method: 'GET' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setProductsError(data?.message || 'Failed to load products');
+        return;
+      }
+      const list = Array.isArray(data) ? data : data?.products || [];
+      setProducts(Array.isArray(list) ? list : []);
+    } catch (err) {
+      setProductsError(err?.message || 'Network error');
+    } finally {
+      setLoadingProducts(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!isAuthed) return;
+    if (route.name !== 'products') return;
+    if (products.length > 0) return;
+    loadProducts(auth.token);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthed, route.name]);
 
   function handleLogout() {
     clearAuth();
-    setAuthState({ token: '', role: '' });
+    setAuthState({ token: '', role: '', username: '' });
     setCart([]);
     localStorage.removeItem('cart');
-    navigate('/login');
+    setProducts([]);
+    navigate('#/login');
   }
 
   function onAddToCart(product) {
@@ -946,8 +977,6 @@ function App() {
     localStorage.removeItem('cart');
   }
 
-  const route = useMemo(() => parseRoute(routeHash), [routeHash]);
-
   let content = null;
 
   if (route.name === 'login') {
@@ -957,16 +986,20 @@ function App() {
       <RequireAuth isAuthed={isAuthed}>
         <ProductsPage
           token={auth.token}
+          products={products}
+          loadingProducts={loadingProducts}
+          productsError={productsError}
+          onReload={() => loadProducts(auth.token)}
           cartItems={cart}
           onAddToCart={onAddToCart}
-          onSetCartItemQuantity={onSetCartItemQuantity}
+          onSetQty={onSetCartItemQuantity}
         />
       </RequireAuth>
     );
   } else if (route.name === 'cart') {
     content = (
       <RequireAuth isAuthed={isAuthed}>
-        <CartPage cartItems={cart} onSetCartItemQuantity={onSetCartItemQuantity} onRemoveFromCart={onRemoveFromCart} />
+        <CartPage cartItems={cart} onSetQty={onSetCartItemQuantity} onRemove={onRemoveFromCart} />
       </RequireAuth>
     );
   } else if (route.name === 'checkout') {
@@ -993,7 +1026,7 @@ function App() {
         <h1>Not Found</h1>
         <div className="card">
           <div className="muted">Unknown route: {route.path}</div>
-          <button className="btn primary" onClick={() => navigate(isAuthed ? '/products' : '/login')}>
+          <button className="btn primary" onClick={() => navigate(isAuthed ? '#/products' : '#/login')}>
             Go home
           </button>
         </div>
@@ -1003,7 +1036,13 @@ function App() {
 
   return (
     <div className="App">
-      <TopNav isAuthed={isAuthed} role={auth.role} cartCount={count} onLogout={handleLogout} />
+      <NavBar
+        isAuthed={isAuthed}
+        role={auth.role}
+        username={auth.username}
+        cartCount={count}
+        onLogout={handleLogout}
+      />
 
       <div className="container">
         {isAuthed ? (
