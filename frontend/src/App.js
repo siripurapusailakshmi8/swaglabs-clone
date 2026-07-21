@@ -69,7 +69,13 @@ function parseHashRoute(hash) {
   };
 
   if (route.name === 'receipt' && segments[1]) {
-    route.params.orderId = segments[1];
+    // hash segment is already decoded by browser location.hash (except some edge chars),
+    // but ensure we decode in case it was encoded.
+    try {
+      route.params.orderId = decodeURIComponent(segments[1]);
+    } catch {
+      route.params.orderId = segments[1];
+    }
   }
 
   return route;
@@ -168,8 +174,10 @@ function validateCheckoutCustomer(customer) {
 }
 
 function mapBackendErrorsToCheckoutFields(errJson) {
-  // Expected shape (per task):
+  // Expected shape:
   // { errors: { "customer.firstName": "Required", ... } }
+  // Also supports:
+  // { errors: { firstName: "Required" } } or { message: "...", errors: [...] }
   const out = {};
   const errors = errJson?.errors;
   if (!errors || typeof errors !== 'object' || Array.isArray(errors)) return out;
@@ -675,7 +683,9 @@ function ReceiptPage({ token, orderId }) {
       setError('');
 
       try {
-        const res = await authedRequest(`${API_BASE}/orders/${encodeURIComponent(orderId)}`, token, { method: 'GET' });
+        const res = await authedRequest(`${API_BASE}/orders/${encodeURIComponent(String(orderId))}`, token, {
+          method: 'GET',
+        });
         const data = await res.json().catch(() => ({}));
 
         if (!res.ok) {
@@ -685,7 +695,7 @@ function ReceiptPage({ token, orderId }) {
 
         if (alive) setOrder(data);
       } catch (err) {
-        setError(err?.message || 'Network error');
+        if (alive) setError(err?.message || 'Network error');
       } finally {
         if (alive) setLoading(false);
       }
@@ -704,13 +714,13 @@ function ReceiptPage({ token, orderId }) {
   }, [order]);
 
   const summary = useMemo(() => {
-    const subtotal = items.reduce((sum, it) => {
+    const subtotalCalc = items.reduce((sum, it) => {
       const price = Number(it.price) || 0;
       const qty = Number(it.quantity) || 0;
       return sum + price * qty;
     }, 0);
-    const total = Number(order?.total) || Number(order?.order?.total) || subtotal;
-    return { subtotal, total };
+    const totalCalc = Number(order?.total) || Number(order?.order?.total) || subtotalCalc;
+    return { subtotal: subtotalCalc, total: totalCalc };
   }, [items, order]);
 
   const displayOrderId = order?.orderId ?? order?.id ?? order?._id ?? orderId;
@@ -779,6 +789,9 @@ function AdminOrdersPage({ token, role }) {
   const isAdmin = role === 'admin';
 
   useEffect(() => {
+    // Ensure access denied page does not call admin endpoint when not admin.
+    if (!isAdmin) return;
+
     let alive = true;
 
     async function load() {
@@ -797,13 +810,13 @@ function AdminOrdersPage({ token, role }) {
         const list = Array.isArray(data) ? data : data?.orders || [];
         if (alive) setOrders(Array.isArray(list) ? list : []);
       } catch (err) {
-        setError(err?.message || 'Network error');
+        if (alive) setError(err?.message || 'Network error');
       } finally {
         if (alive) setLoading(false);
       }
     }
 
-    if (isAdmin) load();
+    load();
 
     return () => {
       alive = false;
@@ -937,7 +950,7 @@ function App() {
     if (products.length > 0) return;
     loadProducts(auth.token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthed, route.name]);
+  }, [isAuthed, route.name, auth.token, products.length]);
 
   function handleLogout() {
     clearAuth();
